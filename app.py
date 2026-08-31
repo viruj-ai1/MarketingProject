@@ -11,6 +11,7 @@ inner_app_path = os.path.join(inner_dir, 'app.py')
 spec = importlib.util.spec_from_file_location("inner_app", inner_app_path)
 inner_app = importlib.util.module_from_spec(spec)
 sys.modules["inner_app"] = inner_app
+sys.path.insert(0, inner_dir)
 spec.loader.exec_module(inner_app)
 
 # Expose the Flask app object for Gunicorn
