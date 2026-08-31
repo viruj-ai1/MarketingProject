@@ -1,7 +1,21 @@
 # app.py - Main Flask Application
+# CRITICAL: Set Windows event loop policy BEFORE any asyncio operations
+# This must be done before importing any modules that use asyncio
+# Use ProactorEventLoop for Windows - it supports subprocess execution required by Playwright
+import sys
+import asyncio
+if sys.platform == 'win32':
+    if sys.version_info < (3, 14):
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+    if hasattr(sys.stdout, 'reconfigure'):
+        try:
+            sys.stdout.reconfigure(encoding='utf-8')  # type: ignore[attr-defined]
+            sys.stderr.reconfigure(encoding='utf-8')  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
 from flask import Flask, render_template, request, jsonify, Response
 import os
-import sys
 from datetime import datetime
 import json
 import threading
@@ -24,6 +38,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), 'synthesis_engine'))
 from synthesis_engine.analysis import SynthesisAnalyzer
 from synthesis_engine.utils import initialize_session, get_session_data, update_session_data
 from synthesis_engine.api_buyer_finder import ApiBuyerFinder  # Import the new API Buyer Finder
+from synthesis_engine.api_buyer_discovery import ApiBuyerDiscoveryService
 from synthesis_engine.api_manufacturer_service import ApiManufacturerService
 from synthesis_engine.api_manufacturer_discovery import ApiManufacturerDiscoveryService
 
@@ -33,6 +48,7 @@ app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
 # Global analyzer instance - lazy loaded to reduce memory usage
 analyzer = None
 api_buyer_finder = None # Global instance for API Buyer Finder
+api_buyer_discovery = None
 api_manufacturer_service = None
 api_manufacturer_discovery = None
 new_manufacturer_service = None
@@ -46,7 +62,8 @@ progress_queues = {}
 # Lazy initialization function to reduce startup memory usage
 def initialize_services():
     """Lazy initialization of heavy services to reduce memory footprint"""
-    global analyzer, api_buyer_finder, api_manufacturer_service, api_manufacturer_discovery
+    global analyzer, api_buyer_finder, api_buyer_discovery
+    global api_manufacturer_service, api_manufacturer_discovery
     global new_manufacturer_service, new_manufacturer_discovery
     
     if analyzer is None:
@@ -56,6 +73,12 @@ def initialize_services():
     if api_buyer_finder is None:
         with app.app_context():
             api_buyer_finder = ApiBuyerFinder()
+            # Use ApiBuyerDiscoveryService for verified discovery
+            api_buyer_discovery = ApiBuyerDiscoveryService()
+    elif api_buyer_discovery is None:
+        with app.app_context():
+            # Use ApiBuyerDiscoveryService for verified discovery
+            api_buyer_discovery = ApiBuyerDiscoveryService()
     
     if api_manufacturer_service is None:
         with app.app_context():
@@ -108,6 +131,7 @@ def analyze_synthesis():
         # The actual result will be stored in the session data when complete
         def run_analysis_in_thread():
             try:
+                assert analyzer is not None
                 result = analyzer.run_full_analysis(
                     api_name=api_name,
                     supplier_preference=supplier_pref,
@@ -123,7 +147,8 @@ def analyze_synthesis():
                     'results': result,
                     'timestamp': datetime.now().isoformat()
                 })
-                progress_queues[session_id].put({'percentage': 100, 'message': 'Analysis complete!'})
+                if session_id in progress_queues:
+                    progress_queues[session_id].put({'percentage': 100, 'message': 'Analysis complete!'})
             except Exception as e:
                 print(f"Error in analysis thread for session {session_id}: {e}")
                 update_session_data(session_id, {
@@ -131,7 +156,8 @@ def analyze_synthesis():
                     'results': {'success': False, 'error': f'Analysis failed: {str(e)}'},
                     'timestamp': datetime.now().isoformat()
                 })
-                progress_queues[session_id].put({'percentage': 0, 'message': f'Analysis failed: {str(e)}', 'error': True})
+                if session_id in progress_queues:
+                    progress_queues[session_id].put({'percentage': 0, 'message': f'Analysis failed: {str(e)}', 'error': True})
             finally:
                 # Clean up the queue and event after analysis (or stop)
                 if session_id in progress_queues:
@@ -211,6 +237,8 @@ def chat():
             return jsonify({'error': 'Invalid session'}), 400
         
         # Generate chatbot response
+        if not analyzer:
+            return jsonify({'error': 'Analyzer service uninitialized'}), 500
         response = analyzer.chat_response(message, session_data)
         
         return jsonify({
@@ -270,6 +298,7 @@ def predict_route():
                     if session_id in progress_queues:
                         progress_queues[session_id].put({'status': 'progress', 'progress': progress, 'message': message})
                 
+                assert analyzer is not None
                 result = analyzer.predict_synthesis_route(
                     api_name, 
                     country_preference, 
@@ -346,6 +375,9 @@ def visualize_reaction():
         if not reaction_smiles:
             return jsonify({'error': 'Reaction SMILES is required.'}), 400
 
+        if not analyzer:
+            return jsonify({'success': False, 'error': 'Analyzer service uninitialized.'}), 500
+
         base64_image = analyzer._generate_reaction_image(reaction_smiles)
 
         if base64_image:
@@ -374,13 +406,26 @@ def find_buyers():
         initialize_services()  # Lazy load services when needed
         data = request.get_json()
         api_name = data.get('api_name')
-        country = data.get('country') # Extract country from request
+        country = data.get('country')  # Extract country from request
+        verified = data.get('verified', True)
 
-        if not api_name or not country: # Both are now required
+        if not api_name or not country:  # Both are now required
             return jsonify({'error': 'API name and country are required'}), 400
 
-        results = api_buyer_finder.find_api_buyers(api_name, country) # Pass both api_name and country
-        return jsonify(results) # Return the full results dictionary directly
+        # VERIFIED MODE: use only evidence-driven V2 discovery (no legacy fallback)
+        if verified:
+            if not api_buyer_discovery:
+                return jsonify({'success': False, 'error': 'Verified buyer discovery service not available.'}), 500
+
+            discovery_result = api_buyer_discovery.discover(api_name, country)
+            # Always return the discovery_result as-is (success may be True or False)
+            return jsonify(discovery_result)
+
+        # UNVERIFIED MODE: use legacy finder (may return heuristic / potential leads)
+        if not api_buyer_finder:
+            return jsonify({'success': False, 'error': 'API Buyer Finder service not available.'}), 500
+        results = api_buyer_finder.find_api_buyers(api_name, country)  # Pass both api_name and country
+        return jsonify(results)  # Return the full results dictionary directly
     except Exception as e:
         print(f"[DEBUG] Error in find_buyers endpoint: {e}")
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
@@ -396,6 +441,9 @@ def find_manufacturers():
 
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
+
+        if not api_manufacturer_service:
+            return jsonify({'success': False, 'error': 'Manufacturer service not available.'}), 500
 
         records = api_manufacturer_service.query(api_name, country)
         return jsonify({
@@ -421,9 +469,13 @@ def discover_manufacturers():
         if not api_name or not country:
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
 
+        if not api_manufacturer_discovery:
+            return jsonify({'success': False, 'error': 'Manufacturer discovery service not available.'}), 500
+
         discovery_result = api_manufacturer_discovery.discover(api_name, country)
         if not discovery_result.get('success', False):
-            return jsonify({'success': False, 'error': discovery_result.get('error', 'Discovery failed')}), 500
+            error_msg = discovery_result.get('error') or discovery_result.get('message') or 'Discovery failed'
+            return jsonify({'success': False, 'error': error_msg}), 400
 
         return jsonify({
             'success': True,
@@ -435,7 +487,9 @@ def discover_manufacturers():
             'requested_country': country
         })
     except Exception as e:
-        print(f"[DEBUG] Error in find_manufacturers endpoint: {e}")
+        import traceback
+        traceback.print_exc()
+        print(f"[DEBUG] Error in discover_manufacturers endpoint: {e}")
         return jsonify({'success': False, 'error': f'Server error: {str(e)}'}), 500
 
 @app.route('/api/download_buyers', methods=['POST'])
@@ -452,6 +506,8 @@ def download_buyers():
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
         
         # Fetch ALL data directly from database (existing + newly added)
+        if not api_buyer_finder:
+            return jsonify({'success': False, 'error': 'API Buyer Finder service not available.'}), 500
         engine = api_buyer_finder.get_db_engine()
         if not engine:
             return jsonify({'success': False, 'error': 'Database connection failed'}), 500
@@ -542,6 +598,8 @@ def download_manufacturers():
             return jsonify({'success': False, 'error': 'API name and country are required'}), 400
         
         # Get ALL records directly from database (includes existing + newly discovered)
+        if not api_manufacturer_service:
+            return jsonify({'success': False, 'error': 'Manufacturer service not available.'}), 500
         records = api_manufacturer_service.query(api_name, country)
         
         if not records:

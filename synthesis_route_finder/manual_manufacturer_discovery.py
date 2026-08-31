@@ -110,7 +110,6 @@ def create_agent(role: str, instructions: str, tools: list) -> Agent:
         model=groq_model,
         tools=tools,
         instructions=instructions,
-        show_tool_calls=True,
         markdown=True,
     )
 

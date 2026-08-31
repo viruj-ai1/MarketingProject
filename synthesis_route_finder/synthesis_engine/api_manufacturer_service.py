@@ -12,7 +12,7 @@ class ApiManufacturerService:
     and to query manufacturers by API name & country.
     """
 
-    def __init__(self, db_filename: str | None = None, table_name: str = "API_manufacturers"):
+    def __init__(self, db_filename: str | None = None, table_name: str = "api_manufacturers"):
         self.table_name = table_name
         self.db_path = None
         self.is_postgresql = False
@@ -20,16 +20,25 @@ class ApiManufacturerService:
         # Priority 1: Check for PostgreSQL connection (Supabase/cloud)
         database_url = os.getenv("DATABASE_URL")
         if database_url and database_url.startswith("postgresql://"):
-            self.is_postgresql = True
-            self.engine = create_engine(
-                database_url,
-                pool_size=5,
-                max_overflow=10,
-                pool_recycle=3600,
-                echo=False,
-                pool_pre_ping=True,
-            )
-        else:
+            try:
+                test_engine = create_engine(
+                    database_url,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_recycle=3600,
+                    echo=False,
+                    pool_pre_ping=True,
+                )
+                with test_engine.connect() as conn:
+                    conn.execute(text("SELECT 1"))
+                self.engine = test_engine
+                self.is_postgresql = True
+                print("[INFO] ApiManufacturerService: Connected to Supabase PostgreSQL database")
+            except Exception as e:
+                print(f"[WARNING] ApiManufacturerService: PostgreSQL connection failed ({e}). Falling back to SQLite.")
+                self.is_postgresql = False
+
+        if not self.is_postgresql:
             # Priority 2: Fallback to SQLite (local development)
             self.db_path = self._determine_db_path(db_filename)
             self.engine = create_engine(
@@ -39,8 +48,12 @@ class ApiManufacturerService:
                 pool_pre_ping=True,
             )
             self._enable_wal_mode()
-        
-        self._ensure_table()
+            print(f"[INFO] ApiManufacturerService: Using SQLite database at {self.db_path}")
+
+        try:
+            self._ensure_table()
+        except Exception as e:
+            print(f"[WARNING] ApiManufacturerService: Table schema setup issue: {e}")
     
     def _enable_wal_mode(self):
         """Enable WAL mode for better concurrency (SQLite only)"""
@@ -89,6 +102,8 @@ class ApiManufacturerService:
         """Create table with appropriate syntax for PostgreSQL or SQLite"""
         if self.is_postgresql:
             # PostgreSQL syntax
+            # PostgreSQL syntax - matches Supabase schema
+            # Note: Table already exists in Supabase, so this is just for local dev
             create_sql = f"""
             CREATE TABLE IF NOT EXISTS {self.table_name} (
                 id SERIAL PRIMARY KEY,
@@ -101,7 +116,7 @@ class ApiManufacturerService:
                 imported_at TEXT,
                 source_url TEXT,
                 source_name TEXT,
-                UNIQUE(api_name, manufacturer, country)
+                CONSTRAINT {self.table_name}_api_name_manufacturer_country_key UNIQUE (api_name, manufacturer, country)
             );
             """
         else:

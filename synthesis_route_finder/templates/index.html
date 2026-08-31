@@ -1731,7 +1731,9 @@
                 { key: 'country', display: 'Country' },
                 { key: 'form', display: 'Form' },
                 { key: 'strength', display: 'Strength' },
-                { key: 'additional_info', display: 'Additional Info' }
+                { key: 'additional_info', display: 'Evidence (Scraped Text)' },
+                { key: 'url', display: 'Evidence URL' },
+                { key: 'confidence', display: 'Confidence' }
             ];
 
             let tableHtml = `<table class="results-table ${tableType}-table">`; // Add tableType class
@@ -1758,7 +1760,14 @@
                             cellContent = cellContent.substring(1).trim();
                         }
                     }
-                    tableHtml += `<td>${cellContent}</td>`;
+                    // Render URL as a clickable link
+                    if (colDef.key === 'url' && cellContent) {
+                        tableHtml += `<td><a href="${cellContent}" target="_blank" rel="noopener noreferrer">View Evidence</a></td>`;
+                    } else if (colDef.key === 'confidence' && cellContent !== '') {
+                        tableHtml += `<td>${cellContent}%</td>`;
+                    } else {
+                        tableHtml += `<td>${cellContent}</td>`;
+                    }
                 });
                 tableHtml += '</tr>';
             });
@@ -2089,6 +2098,23 @@
                 tableHtml += '<tr>';
                 columns.forEach(col => {
                     let value = row[col.key] || '';
+                    if (!value) {
+                        if (col.key === 'manufacturer') value = row['manufacturers'] || '';
+                        if (col.key === 'api_name') value = row['apiname'] || row['api'] || '';
+                        if (col.key === 'source_name') value = row['source'] || '';
+                        if (col.key === 'source_url') {
+                            value = row['url'] || row['source_url'] || '';
+                            if (!value) {
+                                const src = (row['source_name'] || row['source'] || '').toString().toLowerCase();
+                                if (src.includes('fda')) value = 'https://www.fda.gov/drugs/drug-approvals-and-databases/approved-drug-products-therapeutic-equivalence-evaluations-orange-book';
+                                else if (src.includes('cdsco') || src.includes('dcgi')) value = 'https://cdsco.gov.in/';
+                                else if (src.includes('ema')) value = 'https://www.ema.europa.eu/';
+                                else if (src.includes('pmda')) value = 'https://www.pmda.go.jp/';
+                                else if (src.includes('mhra')) value = 'https://www.mhra.gov.uk/';
+                                else if (src.includes('canada')) value = 'https://www.canada.ca/en/health-canada.html';
+                            }
+                        }
+                    }
                     if (col.key === 'source_url' && value) {
                         const safeUrl = value.replace(/"/g, '&quot;');
                         value = `<a href="${safeUrl}" target="_blank" rel="noopener">Link</a>`;

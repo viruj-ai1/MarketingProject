@@ -1,72 +1,12 @@
-# synthesis_engine/api_buyer_finder.py - API Buyer Search Logic (FDF Manufacturers)
+import os
 import pandas as pd
 import logging
-import os
-import warnings
+from typing import List, Dict, Optional
 import re
 import time
-from typing import List, Dict
-from sqlalchemy import create_engine, text
+
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from groq import Groq
-
-# Logging setup
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy.*")
-
-
-def normalize_company_name(company_name: str) -> str:
-    """
-    Normalize company name by removing common suffixes and variations.
-    This helps identify duplicates like:
-    - "Dr. Reddy's Laboratories Limited" 
-    - "Dr. Reddy's"
-    - "Dr. Reddy's Laboratories"
-    All should be treated as the same company.
-    
-    Args:
-        company_name: The company name to normalize
-        
-    Returns:
-        Normalized company name for comparison
-    """
-    if not company_name or not isinstance(company_name, str):
-        return ""
-    
-    # Convert to lowercase and strip whitespace
-    normalized = company_name.strip().lower()
-    
-    # Remove common suffixes (in order of specificity)
-    suffixes = [
-        r'\s+limited\s*$',
-        r'\s+ltd\.?\s*$',
-        r'\s+laboratories\s+limited\s*$',
-        r'\s+labs\s+limited\s*$',
-        r'\s+laboratories\s*$',
-        r'\s+labs\s*$',
-        r'\s+inc\.?\s*$',
-        r'\s+incorporated\s*$',
-        r'\s+corp\.?\s*$',
-        r'\s+corporation\s*$',
-        r'\s+llc\s*$',
-        r'\s+pvt\.?\s*$',
-        r'\s+private\s+limited\s*$',
-        r'\s+plc\s*$',
-        r'\s+sa\s*$',
-        r'\s+ag\s*$',
-        r'\s+gmbh\s*$',
-    ]
-    
-    for suffix_pattern in suffixes:
-        normalized = re.sub(suffix_pattern, '', normalized, flags=re.IGNORECASE)
-    
-    # Remove extra whitespace and punctuation
-    normalized = re.sub(r'\s+', ' ', normalized)  # Multiple spaces to single space
-    normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove punctuation (keep alphanumeric and spaces)
-    normalized = normalized.strip()
-    
-    return normalized
 
 try:
     import psycopg2
@@ -74,45 +14,35 @@ try:
     PSYCOPG2_AVAILABLE = True
 except ImportError:
     PSYCOPG2_AVAILABLE = False
-    logger.warning("⚠ psycopg2 not installed. Install with: pip install psycopg2-binary")
 
-class ApiBuyerFinder:
-    """
-    API Buyer Finder - Finds FDF manufacturers using DuckDuckGo + Tavily search
-    validated by Groq LLM. No scraping required.
-    """
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+
+class ApiBuyerDiscoveryService:
+    """API Buyer Discovery Service using DuckDuckGo + Tavily search with Groq LLM validation."""
     
     def __init__(self):
-        # ====== API KEYS FROM ENV (with fallback defaults) ======
-        # Priority: Environment variable > Fallback default
+        # ============================================================
+        # CONFIG
+        # ============================================================
         self.GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-        self.DATABASE_URL = os.getenv("DATABASE_URL")
         self.GROQ_MODEL = "llama-3.3-70b-versatile"
         
+        # Tavily API Key
+        self.TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+        
+        # Supabase Database URL
+        self.DATABASE_URL = os.getenv("DATABASE_URL")
+        self.TABLE_NAME = "viruj"
+        
         if not self.GROQ_API_KEY:
-            logger.warning("⚠ GROQ_API_KEY is not set!")
-        else:
-            logger.info("✅ Groq API key configured")
+            logger.error("⚠ GROQ_API_KEY is not set!")
+            raise ValueError("GROQ_API_KEY is required")
         
-        if not self.TAVILY_API_KEY:
-            logger.warning("⚠ TAVILY_API_KEY is not set!")
-        else:
-            logger.info("✅ Tavily API key configured")
-        
-        # Initialize Groq client
-        self.groq_client = Groq(api_key=self.GROQ_API_KEY) if self.GROQ_API_KEY else None
-        
-        # ====== DATABASE CONFIG ======
-        # Only Supabase (PostgreSQL) is supported - DATABASE_URL is required
-        if not self.DATABASE_URL:
-            logger.error("❌ DATABASE_URL is not set! Supabase PostgreSQL connection is required.")
-            logger.error("❌ Please set DATABASE_URL environment variable with your Supabase PostgreSQL connection string")
-        elif not self.DATABASE_URL.startswith("postgresql://"):
-            logger.error(f"❌ DATABASE_URL must start with 'postgresql://' - got: {self.DATABASE_URL[:20]}...")
-        else:
-            logger.info("✅ DATABASE_URL configured - will use Supabase PostgreSQL")
-        # ============================
+        self.groq_client = Groq(api_key=self.GROQ_API_KEY)
+
+    # No scraping - we'll use DuckDuckGo + Tavily search results validated by Groq
     
     # ============================================================
     # MARKDOWN TABLE PARSER
@@ -187,6 +117,58 @@ class ApiBuyerFinder:
 
         return df
 
+    def _normalize_company_name(self, company_name: str) -> str:
+        """
+        Normalize company name by removing common suffixes and variations.
+        This helps identify duplicates like:
+        - "Dr. Reddy's Laboratories Limited" 
+        - "Dr. Reddy's"
+        - "Dr. Reddy's Laboratories"
+        All should be treated as the same company.
+        
+        Args:
+            company_name: The company name to normalize
+            
+        Returns:
+            Normalized company name for comparison
+        """
+        if not company_name or not isinstance(company_name, str):
+            return ""
+        
+        # Convert to lowercase and strip whitespace
+        normalized = company_name.strip().lower()
+        
+        # Remove common suffixes (in order of specificity)
+        suffixes = [
+            r'\s+limited\s*$',
+            r'\s+ltd\.?\s*$',
+            r'\s+laboratories\s+limited\s*$',
+            r'\s+labs\s+limited\s*$',
+            r'\s+laboratories\s*$',
+            r'\s+labs\s*$',
+            r'\s+inc\.?\s*$',
+            r'\s+incorporated\s*$',
+            r'\s+corp\.?\s*$',
+            r'\s+corporation\s*$',
+            r'\s+llc\s*$',
+            r'\s+pvt\.?\s*$',
+            r'\s+private\s+limited\s*$',
+            r'\s+plc\s*$',
+            r'\s+sa\s*$',
+            r'\s+ag\s*$',
+            r'\s+gmbh\s*$',
+        ]
+        
+        for suffix_pattern in suffixes:
+            normalized = re.sub(suffix_pattern, '', normalized, flags=re.IGNORECASE)
+        
+        # Remove extra whitespace and punctuation
+        normalized = re.sub(r'\s+', ' ', normalized)  # Multiple spaces to single space
+        normalized = re.sub(r'[^\w\s]', '', normalized)  # Remove punctuation (keep alphanumeric and spaces)
+        normalized = normalized.strip()
+        
+        return normalized
+
     # ============================================================
     # DUCKDUCKGO SEARCH
     # ============================================================
@@ -238,7 +220,7 @@ class ApiBuyerFinder:
             return all_results[:30]  # Limit to top 30
             
         except ImportError:
-            logger.warning("❌ ddgs package not installed. Install with: pip install ddgs")
+            logger.error("❌ ddgs package not installed. Install with: pip install ddgs")
             return []
         except Exception as e:
             logger.error(f"DuckDuckGo search failed: {e}")
@@ -374,9 +356,6 @@ class ApiBuyerFinder:
         Call Groq API with proper rate limiting and retry logic for 429 errors.
         Returns the response content or raises an exception.
         """
-        if not self.groq_client:
-            raise Exception("Groq client not initialized. GROQ_API_KEY is required.")
-        
         last_exception = None
         
         for attempt in range(max_retries):
@@ -398,6 +377,7 @@ class ApiBuyerFinder:
                 last_exception = e
                 
                 # Check if it's a rate limit error (429)
+                # Check multiple ways: status code, error message, exception type
                 is_rate_limit = (
                     "429" in error_str or 
                     "too many requests" in error_str or 
@@ -502,7 +482,7 @@ Return ONLY a markdown table with EXACTLY these columns:
 - Manufacturer Country: MUST be "{country}" if mentioned, otherwise leave blank (do not infer from company name alone)
 - Verification Source: Short description like "Search result snippet"
 - Confidence (%): 0-100 based on how clear the evidence is in snippet. Use lower confidence if information is incomplete.
-- URL: The exact URL from search result - REQUIRED. MUST include the full URL (e.g., https://example.com/page). If URL is not available in the snippet, use the URL from the search result that contains this information. NEVER leave URL empty.
+- URL: The exact URL from search result
 - Verification Status: "Verified" ONLY if snippet clearly shows FDF manufacturer with form and brand name. Use "Unverified" if information is incomplete.
 - Additional Info: Brand/product name is REQUIRED here. Must contain brand name to prove it's a finished product. If no brand name in snippet, DO NOT extract that row.
 
@@ -544,33 +524,6 @@ Return ONLY the markdown table, no explanations.
                     if "confidence" in df.columns:
                         df["confidence"] = pd.to_numeric(df["confidence"], errors="coerce").fillna(100)
                     
-                    # CRITICAL: Map URLs from search results to extracted rows
-                    # If URL is missing or empty, try to find it from the search results
-                    def fill_missing_url(row):
-                        url = str(row.get('url', '')).strip()
-                        # If URL is missing or invalid, try to find it from search results
-                        if not url or url.lower() in ['', 'none', 'n/a', 'na', 'null']:
-                            company_name = str(row.get('company', '')).strip().lower()
-                            # Try to match company name to search results
-                            for search_result in batch_results:
-                                title = str(search_result.get('title', '')).lower()
-                                snippet = str(search_result.get('snippet', '')).lower()
-                                search_url = str(search_result.get('url', '')).strip()
-                                # If company name appears in title or snippet, use this URL
-                                if company_name and company_name in title or company_name in snippet:
-                                    if search_url and search_url.startswith('http'):
-                                        return search_url
-                        # If URL exists but doesn't start with http, try to fix it
-                        if url and not url.startswith('http'):
-                            if url.startswith('www.'):
-                                url = 'https://' + url
-                            elif not url.startswith('http'):
-                                # If it's a relative URL, we can't use it - return empty
-                                return ""
-                        return url if url and url.startswith('http') else ""
-                    
-                    df['url'] = df.apply(fill_missing_url, axis=1)
-                    
                     # Add source information
                     df["source_site"] = "Search Result"
                     all_extracted_data.append(df)
@@ -589,6 +542,9 @@ Return ONLY the markdown table, no explanations.
             return pd.DataFrame()
         
         # Combine all batches
+        if not all_extracted_data:
+            return pd.DataFrame()
+        
         combined_df = pd.concat(all_extracted_data, ignore_index=True)
         logger.info(f"✅ Total extracted: {len(combined_df)} manufacturers from {len(search_results)} search results")
         
@@ -613,14 +569,9 @@ Return ONLY the markdown table, no explanations.
                 form = str(row.get('form', '')).strip()
                 additional_info = str(row.get('additional_info', '')).strip()
                 company = str(row.get('company', '')).strip()
-                url = str(row.get('url', '')).strip()
                 
                 # Form is REQUIRED - cannot be empty
                 if not form or form.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
-                    return False
-                
-                # URL is REQUIRED - must be a valid HTTP/HTTPS URL
-                if not url or not url.startswith('http'):
                     return False
                 
                 # Additional Info must contain brand name or evidence
@@ -656,7 +607,7 @@ Return ONLY the markdown table, no explanations.
             
             removed_incomplete = before_validation - len(combined_df)
             if removed_incomplete > 0:
-                logger.info(f"🚫 Post-extraction validation: Removed {removed_incomplete} entries with missing required fields (form, brand name, URL, or additional_info)")
+                logger.info(f"🚫 Post-extraction validation: Removed {removed_incomplete} entries with missing required fields (form, brand name, or additional_info)")
         
         return combined_df
 
@@ -665,13 +616,14 @@ Return ONLY the markdown table, no explanations.
     # ============================================================
     def run_pipeline(self, api: str, country: str) -> pd.DataFrame:
         """
-        1. Search with DuckDuckGo + Tavily to find relevant URLs (combined results)
-        2. Use Groq LLM to validate and extract manufacturer data directly from search snippets
-        3. Filter and deduplicate results
-        4. Return validated manufacturer data WITHOUT scraping pages
-        
-        NOTE: This approach uses search result snippets for validation, not full page content.
-        """
+    1. Search with DuckDuckGo + Tavily to find relevant URLs (combined results)
+    2. Use Groq LLM to validate and extract manufacturer data directly from search snippets
+    3. Filter and deduplicate results
+    4. Return validated manufacturer data WITHOUT scraping pages
+    
+    NOTE: This approach uses search result snippets for validation, not full page content.
+    Groq's database won't be updated, but this provides fast, evident results.
+    """
         logger.info(f"🚀 Starting FDF validation pipeline (NO SCRAPING) for API='{api}', Country='{country}'")
 
         # 1. Combined search (DuckDuckGo + Tavily)
@@ -704,13 +656,12 @@ Return ONLY the markdown table, no explanations.
             all_df["manufacturer_country"] = all_df["manufacturer_country"].replace("EMPTY", "")
             all_df["manufacturer_country"] = all_df["manufacturer_country"].fillna("")
         
-        # ADDITIONAL VALIDATION: Reject entries with empty form, empty additional_info, or missing URL
+        # ADDITIONAL VALIDATION: Reject entries with empty form or empty additional_info
         if not all_df.empty:
             def has_minimum_required_data(row):
                 """Check if row has minimum required data."""
                 form = str(row.get('form', '')).strip()
                 additional_info = str(row.get('additional_info', '')).strip()
-                url = str(row.get('url', '')).strip()
                 
                 # Form is REQUIRED - reject if empty
                 if not form or form.lower() in ['', 'unknown', 'n/a', 'na', 'none']:
@@ -720,19 +671,15 @@ Return ONLY the markdown table, no explanations.
                 if not additional_info or len(additional_info) < 5:
                     return False
                 
-                # URL is REQUIRED - must be a valid HTTP/HTTPS URL
-                if not url or not url.startswith('http'):
-                    return False
-                
                 return True
-        
-        before_min_validation = len(all_df)
-        min_validation_mask = all_df.apply(has_minimum_required_data, axis=1)
-        all_df = all_df[min_validation_mask].copy()
-        
-        removed_min = before_min_validation - len(all_df)
-        if removed_min > 0:
-            logger.info(f"🚫 Removed {removed_min} entries missing form, additional_info, or valid URL")
+            
+            before_min_validation = len(all_df)
+            min_validation_mask = all_df.apply(has_minimum_required_data, axis=1)
+            all_df = all_df[min_validation_mask].copy()
+            
+            removed_min = before_min_validation - len(all_df)
+            if removed_min > 0:
+                logger.info(f"🚫 Removed {removed_min} entries missing form or additional_info")
 
         # Ensure all required columns exist in all_df before filtering (safety check)
         required_columns = ["company", "form", "strength", "manufacturer_country", "verification_source", 
@@ -791,13 +738,13 @@ Return ONLY the markdown table, no explanations.
                 return False
             
             country_mask = verified_df["manufacturer_country"].apply(country_matches)
-        country_filtered_df = verified_df[country_mask].copy()
-        
-        if len(country_filtered_df) > 0:
-            logger.info(f"🌍 Filtered to {len(country_filtered_df)} records matching country '{country}' (from {total_before_filter} total verified)")
-            verified_df = country_filtered_df
-        else:
-            logger.warning(f"⚠ No records found matching country '{country}'. Showing all {total_before_filter} verified records.")
+            country_filtered_df = verified_df[country_mask].copy()
+            
+            if len(country_filtered_df) > 0:
+                logger.info(f"🌍 Filtered to {len(country_filtered_df)} records matching country '{country}' (from {total_before_filter} total verified)")
+                verified_df = country_filtered_df
+            else:
+                logger.warning(f"⚠ No records found matching country '{country}'. Showing all {total_before_filter} verified records.")
 
         # Filter out anonymous/generic manufacturer names
         if "company" in verified_df.columns:
@@ -831,12 +778,12 @@ Return ONLY the markdown table, no explanations.
                 return False
             
             before_anonymous_filter = len(verified_df)
-        anonymous_mask = verified_df["company"].apply(is_anonymous_manufacturer)
-        verified_df = verified_df[~anonymous_mask].copy()  # Keep non-anonymous
-        
-        removed_count = before_anonymous_filter - len(verified_df)
-        if removed_count > 0:
-            logger.info(f"🚫 Filtered out {removed_count} anonymous/generic manufacturer entries")
+            anonymous_mask = verified_df["company"].apply(is_anonymous_manufacturer)
+            verified_df = verified_df[~anonymous_mask].copy()  # Keep non-anonymous
+            
+            removed_count = before_anonymous_filter - len(verified_df)
+            if removed_count > 0:
+                logger.info(f"🚫 Filtered out {removed_count} anonymous/generic manufacturer entries")
         
         # Drop duplicates by company+form+strength+url
         verified_df = verified_df.drop_duplicates(
@@ -874,59 +821,24 @@ Return ONLY the markdown table, no explanations.
         return verified_df
 
     # ============================================================
-    # DATABASE METHODS
+    # SUPABASE DATABASE FETCH
     # ============================================================
-    def get_db_engine(self):
+    def fetch_from_supabase(self, api: str, country: str) -> pd.DataFrame:
         """
-        Get database engine - ONLY supports PostgreSQL (Supabase).
-        DATABASE_URL environment variable is required.
-        """
-        database_url = os.getenv("DATABASE_URL") or self.DATABASE_URL
-        
-        if not database_url:
-            logger.error("❌ DATABASE_URL is not set! Cannot connect to Supabase.")
-            raise ValueError("DATABASE_URL environment variable is required for Supabase connection")
-        
-        if not database_url.startswith("postgresql://"):
-            logger.error(f"❌ DATABASE_URL must start with 'postgresql://'")
-            raise ValueError(f"Invalid DATABASE_URL format. Must start with 'postgresql://'")
-        
-        try:
-            logger.info("🔗 Connecting to PostgreSQL (Supabase) database...")
-            engine = create_engine(
-                database_url,
-                pool_size=5,
-                max_overflow=10,
-                pool_recycle=3600,
-                echo=False
-            )
-            with engine.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            logger.info("✅ PostgreSQL (Supabase) database connected successfully")
-            return engine
-        except Exception as e:
-            logger.error(f"❌ Failed to connect to Supabase PostgreSQL: {e}")
-            raise
-
-    def fetch_existing_data(self, api: str, country: str) -> pd.DataFrame:
-        """
-        Fetch existing manufacturer data from Supabase database based on API name and country.
+        Fetch existing manufacturer data from Supabase viruj table based on API name and country.
         Returns DataFrame with existing results, or empty DataFrame if none found.
         """
-        if not self.DATABASE_URL or not self.DATABASE_URL.startswith("postgresql://"):
-            logger.error("❌ DATABASE_URL not configured for Supabase")
-            return pd.DataFrame()
-        
         if not PSYCOPG2_AVAILABLE:
-            logger.warning("⚠ psycopg2 is not installed. Cannot fetch from Supabase.")
-            logger.warning("⚠ Install with: pip install psycopg2-binary")
+            logger.warning("psycopg2 is not installed. Cannot fetch from Supabase.")
             return pd.DataFrame()
         
         try:
+            # Connect to Supabase
             conn = psycopg2.connect(self.DATABASE_URL)
             cursor = conn.cursor()
             
             # Query for existing records matching API name and country
+            # Using case-insensitive matching for flexibility
             query = """
                 SELECT company, form, strength, verification_source, 
                        confidence, url, verification_status, 
@@ -946,282 +858,295 @@ Return ONLY the markdown table, no explanations.
             
             if rows:
                 df = pd.DataFrame(rows, columns=columns)
-                logger.info(f"📊 Fetched {len(df)} existing records from Supabase for {api} in {country}")
+                logger.info(f"📊 Fetched {len(df)} existing records from database for {api} in {country}")
                 return df
             else:
-                logger.info(f"📊 No existing records found in Supabase for {api} in {country}")
+                logger.info(f"📊 No existing records found in database for {api} in {country}")
                 return pd.DataFrame()
             
+        except psycopg2.Error as e:
+            logger.error(f"❌ Database error while fetching: {e}")
+            return pd.DataFrame()
         except Exception as e:
-            logger.error(f"❌ Error fetching from Supabase: {e}")
+            logger.error(f"❌ Unexpected error fetching from Supabase: {e}")
             return pd.DataFrame()
 
-    def fetch_existing_companies(self, api: str, country: str):
-        """Fetch list of existing company names from Supabase for the given API and country."""
-        if not self.DATABASE_URL or not self.DATABASE_URL.startswith("postgresql://"):
-            logger.error("❌ DATABASE_URL not configured for Supabase")
-            return []
-        
-        if not PSYCOPG2_AVAILABLE:
-            return []
-        
-        try:
-            conn = psycopg2.connect(self.DATABASE_URL)
-            cursor = conn.cursor()
-            query = """
-                SELECT DISTINCT company FROM viruj 
-                WHERE LOWER(TRIM(api_name)) = LOWER(TRIM(%s))
-                AND LOWER(TRIM(manufacturer_country)) = LOWER(TRIM(%s))
-            """
-            cursor.execute(query, (api, country))
-            companies = [row[0] for row in cursor.fetchall()]
-            cursor.close()
-            conn.close()
-            return companies
-        except Exception as e:
-            logger.error(f"❌ Error fetching existing companies from Supabase: {e}")
-            return []
-
-    def fetch_from_supabase(self, api: str, country: str) -> pd.DataFrame:
-        """
-        Fetch existing manufacturer data from Supabase viruj table based on API name and country.
-        Returns DataFrame with existing results, or empty DataFrame if none found.
-        """
-        return self.fetch_existing_data(api, country)
-
+    # ============================================================
+    # SUPABASE DATABASE INSERTION
+    # ============================================================
     def insert_to_supabase(self, df: pd.DataFrame, api: str, country: str):
         """
         Insert verified manufacturer data into Supabase viruj table.
         Returns tuple: (success: bool, inserted_count: int, duplicate_count: int)
         """
-        return self.insert_into_viruj(df, api, country)
-
-    def insert_into_viruj(self, df: pd.DataFrame, api: str, country: str):
-        """
-        Insert verified manufacturer data into Supabase PostgreSQL database.
-        Returns DataFrame with newly inserted records.
-        """
-        if df.empty:
-            logger.warning("⚠ No data to insert into database")
-            return pd.DataFrame()
-        
-        if not self.DATABASE_URL or not self.DATABASE_URL.startswith("postgresql://"):
-            logger.error("❌ DATABASE_URL not configured for Supabase")
-            return pd.DataFrame()
-        
         if not PSYCOPG2_AVAILABLE:
-            logger.warning("⚠ psycopg2 is not installed. Cannot insert to Supabase.")
-            logger.warning("⚠ Install with: pip install psycopg2-binary")
-            return pd.DataFrame()
+            logger.error("❌ psycopg2 is not installed. Cannot insert to Supabase.")
+            return False, 0, 0
+        
+        if df.empty:
+            logger.warning("⚠ No data to insert into Supabase")
+            return False, 0, 0
         
         try:
+            # Connect to Supabase
+            conn = psycopg2.connect(self.DATABASE_URL)
+            cursor = conn.cursor()
+            
+            # Prepare data for insertion
+            # Ensure all required columns exist with default values
+            df_insert = df.copy()
+            
+            # Add api_name column if not present
+            if "api_name" not in df_insert.columns:
+                df_insert["api_name"] = api
+            
+            # Add manufacturer_country column if not present
+            if "manufacturer_country" not in df_insert.columns:
+                df_insert["manufacturer_country"] = country
+            
+            # Ensure url column exists (should be from extraction)
+            if "url" not in df_insert.columns:
+                df_insert["url"] = ""
+            
+            # Ensure verification_status exists
+            if "verification_status" not in df_insert.columns:
+                df_insert["verification_status"] = "Verified"
+            
+            # Fill NaN values with empty strings or defaults
+            df_insert = df_insert.fillna({
+                "company": "",
+                "form": "",
+                "strength": "",
+                "verification_source": "",
+                "confidence": 0,
+                "url": "",
+                "verification_status": "Verified",
+                "additional_info": "",
+                "source_site": "",
+                "api_name": api,
+                "manufacturer_country": country
+            })
+            
+            # Prepare columns for insertion (match Supabase schema)
+            columns = [
+                "company", "form", "strength", "verification_source", 
+                "confidence", "url", "verification_status", 
+                "additional_info", "source_site", "api_name", "manufacturer_country"
+            ]
+            
+            # Filter to only columns that exist in dataframe
+            available_columns = [col for col in columns if col in df_insert.columns]
+            
+            # Prepare data tuples
+            values = []
+            for _, row in df_insert.iterrows():
+                row_values = [str(row.get(col, "")) if pd.notna(row.get(col, "")) else "" for col in available_columns]
+                values.append(tuple(row_values))
+            
+            # Check for existing records (avoid duplicates)
+            # Use company + form + strength + api_name + manufacturer_country as unique identifier
+            # This is more comprehensive to catch duplicates even if URL differs
+            existing_count = 0
+            new_records = []
+            
+            # Fetch all existing records for this API and country to compare
+            fetch_existing_query = """
+                SELECT company, form, strength, api_name, manufacturer_country
+                FROM viruj 
+                WHERE LOWER(TRIM(api_name)) = LOWER(TRIM(%s))
+                AND LOWER(TRIM(manufacturer_country)) = LOWER(TRIM(%s))
+            """
+            cursor.execute(fetch_existing_query, (api, country))
+            existing_records = cursor.fetchall()
+            
+            # Create a set of existing record keys for fast lookup
+            # Use normalized company names to handle variations like "Dr. Reddy's", "Dr. Reddy's Laboratories Limited", etc.
+            existing_keys = set()
+            for existing_record in existing_records:
+                existing_company = str(existing_record[0] if existing_record[0] else "").strip()
+                normalized_company = self._normalize_company_name(existing_company)
+                existing_form = str(existing_record[1] if existing_record[1] else "").strip().lower()
+                existing_strength = str(existing_record[2] if existing_record[2] else "").strip().lower()
+                existing_api = str(existing_record[3] if existing_record[3] else "").strip().lower()
+                existing_country = str(existing_record[4] if existing_record[4] else "").strip().lower()
                 
-                conn = psycopg2.connect(self.DATABASE_URL)
-                cursor = conn.cursor()
+                existing_key = (
+                    normalized_company,
+                    existing_form,
+                    existing_strength,
+                    existing_api,
+                    existing_country
+                )
+                existing_keys.add(existing_key)
+            
+            for value_tuple in values:
+                # Find corresponding row to get values for duplicate check
+                row_idx = values.index(value_tuple)
+                row = df_insert.iloc[row_idx]
                 
-                # Prepare data for insertion
-                df_insert = df.copy()
+                # Normalize company name for comparison
+                company_name = str(row.get("company", "")).strip()
+                normalized_company = self._normalize_company_name(company_name)
                 
-                # Add api_name column if not present
-                if "api_name" not in df_insert.columns:
-                    df_insert["api_name"] = api
+                form_key = str(row.get("form", "")).strip().lower()
+                strength_key = str(row.get("strength", "")).strip().lower()
+                api_key = str(row.get("api_name", api)).strip().lower()
+                country_key = str(row.get("manufacturer_country", country)).strip().lower()
                 
-                # Add manufacturer_country column if not present
-                if "manufacturer_country" not in df_insert.columns:
-                    df_insert["manufacturer_country"] = country
+                record_key = (
+                    normalized_company,
+                    form_key,
+                    strength_key,
+                    api_key,
+                    country_key
+                )
                 
-                # Ensure all required columns exist
-                for col in ["company", "form", "strength", "verification_source", "confidence", 
-                           "url", "verification_status", "additional_info", "source_site"]:
-                    if col not in df_insert.columns:
-                        if col == "confidence":
-                            df_insert[col] = 0
-                        else:
-                            df_insert[col] = ""
-                
-                # CRITICAL: Filter out rows without valid URLs before insertion
-                before_url_filter = len(df_insert)
-                if "url" in df_insert.columns:
-                    def has_valid_url(row):
-                        url = str(row.get("url", "")).strip()
-                        return url and url.startswith("http")
-                    url_mask = df_insert.apply(has_valid_url, axis=1)
-                    df_insert = df_insert[url_mask].copy()
-                    removed_no_url = before_url_filter - len(df_insert)
-                    if removed_no_url > 0:
-                        logger.warning(f"🚫 Removed {removed_no_url} entries without valid URLs before database insertion")
-                
-                if df_insert.empty:
-                    logger.warning("⚠ No records with valid URLs to insert")
-                    cursor.close()
-                    conn.close()
-                    return pd.DataFrame()
-                
-                # Fill NaN values (but URL should already be validated)
-                df_insert = df_insert.fillna({
-                    "company": "", "form": "", "strength": "", "verification_source": "",
-                    "confidence": 0, "url": "", "verification_status": "Verified",
-                    "additional_info": "", "source_site": "", "api_name": api,
-                    "manufacturer_country": country
-                })
-                
-                # Final URL validation - ensure no empty URLs slipped through
-                if "url" in df_insert.columns:
-                    df_insert = df_insert[df_insert["url"].str.strip().str.startswith("http", na=False)].copy()
-                
-                # Prepare columns for insertion
-                columns = [
-                    "company", "form", "strength", "verification_source", 
-                    "confidence", "url", "verification_status", 
-                    "additional_info", "source_site", "api_name", "manufacturer_country"
-                ]
-                available_columns = [col for col in columns if col in df_insert.columns]
-                
-                # Prepare data tuples
-                values = []
-                for _, row in df_insert.iterrows():
-                    row_values = [str(row.get(col, "")) if pd.notna(row.get(col, "")) else "" for col in available_columns]
-                    values.append(tuple(row_values))
-                
-                # Check for existing records
-                existing_count = 0
-                new_records = []
-                
-                fetch_existing_query = """
-                    SELECT company, form, strength, api_name, manufacturer_country
-                    FROM viruj 
-                    WHERE LOWER(TRIM(api_name)) = LOWER(TRIM(%s))
-                    AND LOWER(TRIM(manufacturer_country)) = LOWER(TRIM(%s))
-                """
-                cursor.execute(fetch_existing_query, (api, country))
-                existing_records = cursor.fetchall()
-                
-                existing_keys = set()
-                for existing_record in existing_records:
-                    # Normalize company name to handle variations like "Dr. Reddy's", "Dr. Reddy's Laboratories", etc.
-                    existing_company = str(existing_record[0] if existing_record[0] else "").strip()
-                    normalized_company = normalize_company_name(existing_company)
-                    
-                    existing_key = (
-                        normalized_company,
-                        str(existing_record[1] if existing_record[1] else "").strip().lower(),
-                        str(existing_record[2] if existing_record[2] else "").strip().lower(),
-                        str(existing_record[3] if existing_record[3] else "").strip().lower(),
-                        str(existing_record[4] if existing_record[4] else "").strip().lower()
-                    )
-                    existing_keys.add(existing_key)
-                
-                for value_tuple in values:
-                    row_idx = values.index(value_tuple)
-                    row = df_insert.iloc[row_idx]
-                    
-                    # Normalize company name for comparison
-                    company_name = str(row.get("company", "")).strip()
-                    normalized_company = normalize_company_name(company_name)
-                    
-                    record_key = (
-                        normalized_company,
-                        str(row.get("form", "")).strip().lower(),
-                        str(row.get("strength", "")).strip().lower(),
-                        str(row.get("api_name", api)).strip().lower(),
-                        str(row.get("manufacturer_country", country)).strip().lower()
-                    )
-                    
-                    if record_key in existing_keys:
-                        existing_count += 1
-                    else:
-                        new_records.append(value_tuple)
-                
-                if not new_records:
-                    logger.info(f"ℹ All {len(values)} records already exist in database")
-                    cursor.close()
-                    conn.close()
-                    return pd.DataFrame()
-                
-                # Insert new records
-                insert_query = f"""
-                    INSERT INTO viruj ({', '.join(available_columns)})
-                    VALUES %s
-                """
-                
-                execute_values(cursor, insert_query, new_records)
-                conn.commit()
-                
-                inserted_count = len(new_records)
-                logger.info(f"✅ Inserted {inserted_count} new records into Supabase")
-                if existing_count > 0:
-                    logger.info(f"ℹ Skipped {existing_count} duplicate records")
-                
+                # Check if record already exists
+                if record_key in existing_keys:
+                    existing_count += 1
+                else:
+                    new_records.append(value_tuple)
+            
+            if not new_records:
+                logger.info(f"ℹ All {len(values)} records already exist in database")
                 cursor.close()
                 conn.close()
+                return True, 0, existing_count
+            
+            # Insert new records
+            insert_query = f"""
+                INSERT INTO viruj ({', '.join(available_columns)})
+                VALUES %s
+            """
+            
+            execute_values(cursor, insert_query, new_records)
+            conn.commit()
+            
+            inserted_count = len(new_records)
+            logger.info(f"✅ Inserted {inserted_count} new records into Supabase")
+            if existing_count > 0:
+                logger.info(f"ℹ Skipped {existing_count} duplicate records")
+            
+            cursor.close()
+            conn.close()
+            
+            return True, inserted_count, existing_count
+            
+        except psycopg2.Error as e:
+            logger.error(f"❌ Database error: {e}")
+            return False, 0, 0
+        except Exception as e:
+            logger.error(f"❌ Unexpected error inserting to Supabase: {e}")
+            return False, 0, 0
+    
+    # ============================================================
+    # MAIN DISCOVER METHOD - Returns data in format expected by Flask interface
+    # ============================================================
+    def discover(self, api: str, country: str) -> Dict:
+        """
+        Main discovery method that:
+        1. Fetches existing data from database
+        2. Runs search pipeline to find new manufacturers
+        3. Inserts new data to database
+        4. Returns data in format expected by Flask interface
+        
+        Returns:
+            {
+                'success': bool,
+                'existing_data': List[Dict],  # Format: company, api, country, form, strength, additional_info, url, confidence
+                'newly_found_companies': List[Dict],  # Same format
+                'api': str,
+                'country': str,
+                'inserted_count': int
+            }
+        """
+        api = api.strip()
+        country = country.strip()
+        
+        if not api or not country:
+            return {
+                'success': False,
+                'error': 'API name and country are required.',
+                'existing_data': [],
+                'newly_found_companies': []
+            }
+        
+        try:
+            # 1. Fetch existing records from database
+            logger.info(f"📊 Fetching existing records from database for {api} in {country}")
+            existing_df = self.fetch_from_supabase(api, country)
+            
+            # 2. Run the pipeline to get new results
+            logger.info(f"🔍 Running search validation pipeline for {api} in {country}")
+            result_df = self.run_pipeline(api, country)
+            
+            newly_found_companies = []
+            inserted_count = 0
+            
+            if not result_df.empty:
+                # 3. Insert data into Supabase
+                logger.info(f"💾 Saving {len(result_df)} new records to Supabase...")
+                insert_success, inserted_count, duplicate_count = self.insert_to_supabase(result_df, api, country)
                 
-                # Return DataFrame with newly inserted records
-                return df_insert.iloc[[values.index(nr) for nr in new_records]].copy()
+                if insert_success:
+                    logger.info(f"✅ Successfully saved {inserted_count} new record(s) to database")
+                    if duplicate_count > 0:
+                        logger.info(f"ℹ Skipped {duplicate_count} duplicate record(s)")
+                else:
+                    logger.warning("⚠ Failed to save some data to Supabase")
+            
+            # 4. Convert DataFrames to list of dicts in format expected by interface
+            def df_to_dict_list(df: pd.DataFrame, api_name: str, country_name: str) -> List[Dict]:
+                """Convert DataFrame to list of dicts with keys expected by interface."""
+                if df.empty:
+                    return []
+                
+                result_list = []
+                for _, row in df.iterrows():
+                    result_list.append({
+                        'company': str(row.get('company', '')),
+                        'api': api_name,
+                        'country': str(row.get('manufacturer_country', country_name)),
+                        'form': str(row.get('form', '')),
+                        'strength': str(row.get('strength', '')),
+                        'additional_info': str(row.get('additional_info', '')),
+                        'url': str(row.get('url', '')),
+                        'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence')) else 0
+                    })
+                return result_list
+            
+            existing_data = df_to_dict_list(existing_df, api, country)
+            
+            # For newly found companies, only include those that were actually inserted
+            if not result_df.empty and inserted_count > 0:
+                # Refresh existing data to get the newly inserted records
+                updated_existing_df = self.fetch_from_supabase(api, country)
+                all_data = df_to_dict_list(updated_existing_df, api, country)
+                
+                # Find newly found companies (those not in original existing_data)
+                existing_company_keys = {
+                    (item['company'].lower(), item['form'].lower(), item['strength'].lower())
+                    for item in existing_data
+                }
+                newly_found_companies = [
+                    item for item in all_data
+                    if (item['company'].lower(), item['form'].lower(), item['strength'].lower()) not in existing_company_keys
+                ]
+            
+            return {
+                'success': True,
+                'api': api,
+                'country': country,
+                'existing_data': existing_data,
+                'newly_found_companies': newly_found_companies,
+                'inserted_count': inserted_count
+            }
             
         except Exception as e:
-            logger.error(f"❌ Database insert error: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return pd.DataFrame()
-
-    # ============================================================
-    # MAIN ENTRY POINT - Compatible with Flask interface
-    # ============================================================
-    def find_api_buyers(self, api: str, country: str):
-        """
-        Main entry point for finding API buyers (FDF manufacturers).
-        Compatible with Flask interface - returns dict with success, existing_data, newly_found_companies.
-        """
-        logger.info(f"\n🔍 Starting pharmaceutical research for {api} in {country}")
-        
-        # Step 1: Fetch existing data
-        existing_data_df = self.fetch_existing_data(api, country)
-        
-        # Step 2: Run pipeline to find new manufacturers
-        try:
-            result_df = self.run_pipeline(api, country)
-        except Exception as e:
-            logger.error(f"❌ Pipeline error: {e}")
-            result_df = pd.DataFrame()
-        
-        # Step 3: Insert new results into database
-        newly_inserted_df = pd.DataFrame()
-        if not result_df.empty:
-            newly_inserted_df = self.insert_into_viruj(result_df, api, country)
-        
-        # Step 4: Format results for Flask interface
-        existing_data_formatted = []
-        if not existing_data_df.empty:
-            for _, row in existing_data_df.iterrows():
-                existing_dict = {
-                    'company': str(row.get('company', '')),
-                    'api': str(row.get('api_name', api)) if 'api_name' in row else api,
-                    'country': str(row.get('manufacturer_country', country)) if 'manufacturer_country' in row else country,
-                    'form': str(row.get('form', '')),
-                    'strength': str(row.get('strength', '')),
-                    'additional_info': str(row.get('additional_info', '')),
-                    'url': str(row.get('url', '')),
-                    'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence', 0)) else 0,
-                }
-                existing_data_formatted.append(existing_dict)
-        
-        newly_found_companies = []
-        if not newly_inserted_df.empty:
-            for _, row in newly_inserted_df.iterrows():
-                company_dict = {
-                    'company': str(row.get('company', '')),
-                    'api': api,
-                    'country': country,
-                    'form': str(row.get('form', '')),
-                    'strength': str(row.get('strength', '')),
-                    'additional_info': str(row.get('additional_info', '')),
-                    'url': str(row.get('url', '')),
-                    'confidence': int(row.get('confidence', 0)) if pd.notna(row.get('confidence', 0)) else 0,
-                }
-                newly_found_companies.append(company_dict)
-        
-        return {
-            "success": True,
-            "existing_data": existing_data_formatted,
-            "newly_found_companies": newly_found_companies
-        }
+            logger.error(f"❌ Error in discover method: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'existing_data': [],
+                'newly_found_companies': []
+            }

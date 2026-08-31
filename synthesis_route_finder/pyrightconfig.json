@@ -1,0 +1,32 @@
+{
+  "include": [
+    "synthesis_engine",
+    "**/*.py"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    "**/node_modules",
+    "**/venv",
+    "**/.venv"
+  ],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "pythonPath": "C:\\Users\\HP\\anaconda3\\python.exe",
+  "typeCheckingMode": "basic",
+  "reportMissingImports": "none",
+  "reportMissingModuleSource": "none",
+  "reportMissingTypeStubs": "none",
+  "executionEnvironments": [
+    {
+      "root": ".",
+      "pythonVersion": "3.12",
+      "pythonPlatform": "Windows",
+      "pythonPath": "C:\\Users\\HP\\anaconda3\\python.exe",
+      "extraPaths": [
+        "synthesis_engine",
+        "C:\\Users\\HP\\anaconda3\\Lib\\site-packages"
+      ]
+    }
+  ]
+}
+
