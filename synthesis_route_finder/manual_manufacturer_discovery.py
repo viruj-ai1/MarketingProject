@@ -194,8 +194,8 @@ def main():
 
     seed_df = load_seed_dataframe(args.csv_path)
     existing_df = seed_df[
-        (seed_df.get("apiname", "").str.contains(api_name, na=False))
-        & (seed_df.get("country", "").str.contains(country, na=False))
+        (seed_df.get("apiname", pd.Series(dtype=str)).str.contains(api_name, na=False))
+        & (seed_df.get("country", pd.Series(dtype=str)).str.contains(country, na=False))
     ]
     skip_list = sorted(existing_df.get("manufacturers", pd.Series(dtype=str)).dropna().unique())
     skip_set = {item.strip().lower() for item in skip_list}
