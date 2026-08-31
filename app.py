@@ -1,14 +1,17 @@
 import sys
 import os
-
-# Add the inner directory to the Python path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'synthesis_route_finder')))
+import importlib.util
 
 # Change the working directory so Flask finds the templates/ and static/ folders
-os.chdir('synthesis_route_finder')
+inner_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), 'synthesis_route_finder'))
+os.chdir(inner_dir)
 
-# Import the actual application
-from app import app
+# Load the inner app.py dynamically to avoid circular import with the root app.py
+inner_app_path = os.path.join(inner_dir, 'app.py')
+spec = importlib.util.spec_from_file_location("inner_app", inner_app_path)
+inner_app = importlib.util.module_from_spec(spec)
+sys.modules["inner_app"] = inner_app
+spec.loader.exec_module(inner_app)
 
-if __name__ == "__main__":
-    app.run()
+# Expose the Flask app object for Gunicorn
+app = inner_app.app
