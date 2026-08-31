@@ -2,6 +2,9 @@
 import multiprocessing
 import os
 
+# Change directory before loading the app
+chdir = os.path.join(os.path.dirname(__file__), 'synthesis_route_finder')
+
 # Server socket
 bind = "0.0.0.0:" + os.environ.get("PORT", "5000")
 backlog = 2048
