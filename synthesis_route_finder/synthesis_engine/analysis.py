@@ -5,7 +5,6 @@ import re
 from collections import Counter
 from agno.agent import Agent
 from agno.models.groq import Groq
-from agno.tools.duckduckgo import DuckDuckGoTools
 from bs4 import BeautifulSoup
 import uuid
 from datetime import datetime

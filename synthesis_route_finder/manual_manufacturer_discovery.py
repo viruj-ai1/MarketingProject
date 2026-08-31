@@ -18,7 +18,6 @@ from typing import List, Dict
 import pandas as pd
 from agno.agent import Agent
 from agno.models.groq import Groq
-from agno.tools.duckduckgo import DuckDuckGoTools
 from dotenv import load_dotenv
 
 from synthesis_route_finder.synthesis_engine.tools import Crawl4aiTools
@@ -132,7 +131,7 @@ Return ONLY a Markdown table with columns:
             web_agent = create_agent(
                 role="Web Agent",
                 instructions=instructions,
-                tools=[DuckDuckGoTools()],
+                tools=[],
             )
             result = web_agent.run(f"Find {api_name} API manufacturers in {country}.")
             if result and result.content:
