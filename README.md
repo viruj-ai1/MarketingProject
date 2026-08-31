@@ -2,10 +2,13 @@
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://www.python.org/)
 [![Flask](https://img.shields.io/badge/Flask-3.0-green.svg)](https://flask.palletsprojects.com/)
-[![Railway Ready](https://img.shields.io/badge/Railway-Ready-purple.svg)](https://railway.app/)
+[![Render](https://img.shields.io/badge/Render-Backend-black.svg)](https://render.com/)
+[![Vercel](https://img.shields.io/badge/Vercel-Frontend-black.svg)](https://vercel.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-An AI-powered Flask web application designed for pharmaceutical intelligence. The platform automates API (Active Pharmaceutical Ingredient) synthesis route analysis, discovering verified manufacturers strictly from regulatory sources, and identifying potential API buyers.
+An AI-powered web application designed for pharmaceutical intelligence. The platform automates API (Active Pharmaceutical Ingredient) synthesis route analysis, discovering verified manufacturers strictly from regulatory sources, and identifying potential API buyers. 
+
+This project is architected for a decoupled deployment: **Backend API on Render** and **Frontend on Vercel**.
 
 ---
 
@@ -32,15 +35,13 @@ An AI-powered Flask web application designed for pharmaceutical intelligence. Th
 
 ## 🏗️ Architecture & Tech Stack
 
-### **Backend**
-- **Framework:** Flask 3.0.3 with Gunicorn WSGI server.
+### **Backend (Render API)**
+- **Framework:** Flask 3.0.3 API with Gunicorn WSGI server.
 - **Database:** PostgreSQL (via Supabase) with SQLAlchemy ORM.
-- **Python Version:** Pinned to `3.12.0`.
+- **AI & Data Intelligence:** Groq (`llama-3.3-70b-versatile`), `crawl4ai`, Pandas, RDKit, Scikit-learn.
 
-### **AI & Data Intelligence**
-- **LLM Engine:** Groq (`llama-3.3-70b-versatile`) integrated via Agno and LiteLLM.
-- **Web Crawling:** `crawl4ai` (Custom local implementation for regulator site parsing).
-- **Informatics:** Pandas, RDKit, Scikit-learn.
+### **Frontend (Vercel)**
+- **UI:** Web templates communicating with the Flask backend REST API.
 
 ---
 
@@ -71,7 +72,7 @@ An AI-powered Flask web application designed for pharmaceutical intelligence. Th
    ```
 
 4. **Environment Variables:**
-   Create a `.env` file in the `synthesis_route_finder` directory and add the following keys:
+   Create a `.env` file in the root directory and add the following keys:
    ```env
    GROQ_API_KEY=your_groq_api_key
    DATABASE_URL=your_supabase_postgresql_url
@@ -83,26 +84,45 @@ An AI-powered Flask web application designed for pharmaceutical intelligence. Th
    ```bash
    python app.py
    ```
-   *The app will be accessible at `http://127.0.0.1:5000`*
+   *The backend will be accessible locally, typically at `http://127.0.0.1:5000`.*
 
 ---
 
-## ☁️ Deployment (Railway)
+## ☁️ Deployment Guide
 
-This project is fully optimized for deployment on the **Railway Free Tier**. 
+### 1. Backend Deployment on Render
 
-- Uses a custom `nixpacks.toml` to manage complex C-library dependencies (RDKit) and isolate builds.
-- Gunicorn is configured in `gunicorn.conf.py` to prevent memory leaks (1 worker, max requests limit, lazy loading of heavy ML models).
+The backend handles the AI-heavy lifting, web scraping, and database communication.
 
-Simply link this repository to your Railway project, set up the Environment Variables in the Railway dashboard, and it will deploy automatically.
+1. Create an account on [Render](https://render.com/).
+2. Click **New +** and select **Web Service**.
+3. Connect your GitHub repository.
+4. **Configuration:**
+   - **Environment:** `Python 3`
+   - **Build Command:** `pip install -r requirements.txt` (or custom build steps if required by RDKit).
+   - **Start Command:** `gunicorn app:app` (or `gunicorn --config gunicorn.conf.py app:app` for memory optimization).
+5. Add your **Environment Variables** (`GROQ_API_KEY`, `DATABASE_URL`, etc.) under the "Environment" tab.
+6. Deploy the service and note your new backend URL (e.g., `https://your-backend-api.onrender.com`).
+
+### 2. Frontend Deployment on Vercel
+
+The frontend application connects to the Render API to display data to users.
+
+1. Update your frontend environment variables or API base URL configurations to point to your new **Render Backend URL**.
+2. Create an account on [Vercel](https://vercel.com/).
+3. Click **Add New Project** and import the frontend portion of your repository.
+4. **Configuration:**
+   - Define the Framework Preset (if using a specific framework, otherwise default).
+   - Add any necessary frontend Environment Variables (e.g., `NEXT_PUBLIC_API_URL=https://your-backend-api.onrender.com`).
+5. Click **Deploy**. Vercel will automatically build and host your frontend.
 
 ---
 
 ## 🔒 Security
 
 - Sensitive keys (API keys, DB credentials) have been completely stripped from the codebase and rely entirely on environment variables.
-- Implements lazy loading and single-worker execution to prevent SIGKILL out-of-memory errors on limited-resource cloud deployments.
-- Includes SQL injection prevention mechanisms via SQLAlchemy parameterization.
+- Implements lazy loading and worker isolation on Render to prevent out-of-memory errors.
+- Cross-Origin Resource Sharing (CORS) should be configured on the Flask backend to only accept requests from your Vercel frontend URL.
 
 ---
 
